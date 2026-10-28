@@ -1,0 +1,69 @@
+name: Build plugin (Windows x64)
+
+on:
+  push:
+  workflow_dispatch:
+    inputs:
+      obs_version:
+        description: "OBS version to build against"
+        default: "33.0.0"
+
+env:
+  OBS_VERSION: ${{ github.event.inputs.obs_version || '33.0.0' }}
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - name: Checkout plugin
+        uses: actions/checkout@v4
+
+      - name: Get libobs headers
+        shell: pwsh
+        run: |
+          git clone --quiet --depth 1 --branch $env:OBS_VERSION --filter=blob:none --sparse https://github.com/obsproject/obs-studio obs-src
+          git -C obs-src sparse-checkout set libobs
+
+      - name: Download obs.dll from the official OBS release
+        shell: pwsh
+        run: |
+          $url = "https://github.com/obsproject/obs-studio/releases/download/$env:OBS_VERSION/OBS-Studio-$env:OBS_VERSION-Windows-x64.zip"
+          Invoke-WebRequest -Uri $url -OutFile obs.zip
+          New-Item -ItemType Directory -Force obs-bin | Out-Null
+          tar -xf obs.zip -C obs-bin bin/64bit/obs.dll
+          Get-Item obs-bin/bin/64bit/obs.dll
+
+      - name: Set up Visual Studio tools
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Make obs.lib from obs.dll
+        shell: pwsh
+        run: |
+          python -m pip install --quiet pefile
+          python scripts/make_def.py obs-bin/bin/64bit/obs.dll obs.def
+          lib /nologo /def:obs.def /machine:x64 /out:obs.lib
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -B build -G "Visual Studio 17 2022" -A x64
+          -DOBS_SOURCE_DIR="${{ github.workspace }}/obs-src"
+          -DOBS_LIB="${{ github.workspace }}/obs.lib"
+          -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          cmake --install build --config Release --prefix package
+          Get-ChildItem -Recurse package | Select-Object FullName
+
+      - name: Upload plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: bongobs-cat-mouth-sync-obs${{ env.OBS_VERSION }}
+          path: package/
