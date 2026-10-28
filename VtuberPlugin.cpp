@@ -4,13 +4,159 @@
 */
 #include "VtuberPlugin.hpp"
 #include "VtuberFrameWork.hpp"
+#include "MouthSync.hpp"
 #include <obs-module.h>
+#include <atomic>
+#include <cmath>
+#include <mutex>
+#include <set>
+#include <string>
 
 namespace{
 	struct Vtuber_data {
-		obs_source_t *source;
-		uint16_t modelId;
+		obs_source_t *source = nullptr;
+		uint16_t modelId = 0;
+
+		// Mouth sync: the audio source we listen to (usually the microphone)
+		std::mutex audioMutex;
+		obs_source_t *audioSource = nullptr;
+		std::string audioName;
+		bool mouthEnabled = false;
+		std::atomic<float> thresholdDb{-45.0f};
+		std::atomic<float> rangeDb{25.0f};
+		float retryTimer = 0.0f;
 	};
+
+	// Finds an audio source by name, including global ones (Mic/Aux, Desktop Audio).
+	// Returns a source with an added reference, or nullptr.
+	obs_source_t *find_audio_source(const std::string &name)
+	{
+		if (name.empty())
+			return nullptr;
+		obs_source_t *src = obs_get_source_by_name(name.c_str());
+		if (src)
+			return src;
+		for (uint32_t ch = 1; ch <= 6; ch++) {
+			obs_source_t *out = obs_get_output_source(ch);
+			if (!out)
+				continue;
+			const char *n = obs_source_get_name(out);
+			if (n && name == n)
+				return out;
+			obs_source_release(out);
+		}
+		return nullptr;
+	}
+
+	// Called by OBS from the audio thread for every audio packet of the source.
+	void mouth_audio_callback(void *param, obs_source_t *,
+				  const struct audio_data *audio, bool muted)
+	{
+		Vtuber_data *vtb = (Vtuber_data *)param;
+		if (muted || !audio || audio->frames == 0) {
+			MouthSync::SetLevel(0.0f);
+			return;
+		}
+
+		size_t channels = audio_output_get_channels(obs_get_audio());
+		if (channels > MAX_AV_PLANES)
+			channels = MAX_AV_PLANES;
+
+		double sum = 0.0;
+		size_t count = 0;
+		for (size_t c = 0; c < channels; c++) {
+			const float *samples = (const float *)audio->data[c];
+			if (!samples)
+				continue;
+			for (uint32_t i = 0; i < audio->frames; i++)
+				sum += (double)samples[i] * samples[i];
+			count += audio->frames;
+		}
+		if (count == 0) {
+			MouthSync::SetLevel(0.0f);
+			return;
+		}
+
+		double rms = std::sqrt(sum / (double)count);
+		float db = rms > 0.0 ? (float)(20.0 * std::log10(rms)) : -100.0f;
+		MouthSync::SetLevel(MouthSync::DbToLevel(
+			db, vtb->thresholdDb.load(), vtb->rangeDb.load()));
+	}
+
+	// Both helpers below must be called with vtb->audioMutex locked.
+	void detach_audio_locked(Vtuber_data *vtb)
+	{
+		if (vtb->audioSource) {
+			obs_source_remove_audio_capture_callback(
+				vtb->audioSource, mouth_audio_callback, vtb);
+			obs_source_release(vtb->audioSource);
+			vtb->audioSource = nullptr;
+		}
+		MouthSync::SetLevel(0.0f);
+	}
+
+	void attach_audio_locked(Vtuber_data *vtb)
+	{
+		if (vtb->audioSource || !vtb->mouthEnabled || vtb->audioName.empty())
+			return;
+		obs_source_t *src = find_audio_source(vtb->audioName);
+		if (!src)
+			return; // the source may not be loaded yet, VtuberTick retries
+		obs_source_add_audio_capture_callback(src, mouth_audio_callback, vtb);
+		vtb->audioSource = src;
+	}
+
+	void update_mouth_settings(Vtuber_data *vtb, obs_data_t *settings)
+	{
+		bool enabled = obs_data_get_bool(settings, "mouth_sync");
+		const char *name = obs_data_get_string(settings, "mouth_audio_source");
+		std::string audioName = name ? name : "";
+
+		vtb->thresholdDb.store((float)obs_data_get_double(settings, "mouth_threshold"));
+		vtb->rangeDb.store((float)obs_data_get_double(settings, "mouth_range"));
+
+		const char *param = obs_data_get_string(settings, "mouth_param");
+		MouthSync::SetParameterName(param ? param : "");
+
+		std::lock_guard<std::mutex> lock(vtb->audioMutex);
+		if (enabled != vtb->mouthEnabled || audioName != vtb->audioName) {
+			detach_audio_locked(vtb);
+			vtb->mouthEnabled = enabled;
+			vtb->audioName = audioName;
+			attach_audio_locked(vtb);
+		}
+		MouthSync::SetEnabled(enabled);
+	}
+
+	bool add_audio_source_name(void *param, obs_source_t *src)
+	{
+		std::set<std::string> *names = (std::set<std::string> *)param;
+		if (obs_source_get_output_flags(src) & OBS_SOURCE_AUDIO) {
+			const char *n = obs_source_get_name(src);
+			if (n && *n)
+				names->insert(n);
+		}
+		return true;
+	}
+
+	void fill_audio_source_list(obs_property_t *p)
+	{
+		std::set<std::string> names;
+		obs_enum_sources(add_audio_source_name, &names);
+		for (uint32_t ch = 1; ch <= 6; ch++) {
+			obs_source_t *out = obs_get_output_source(ch);
+			if (!out)
+				continue;
+			const char *n = obs_source_get_name(out);
+			if (n && *n)
+				names.insert(n);
+			obs_source_release(out);
+		}
+
+		obs_property_list_add_string(p, obs_module_text("MouthNoSource"), "");
+		for (const std::string &n : names)
+			obs_property_list_add_string(p, n.c_str(), n.c_str());
+	}
 
 	}
 
@@ -23,7 +169,7 @@ const char * VtuberPlugin::VtuberPlugin::VtuberGetName(void *unused)
 void * VtuberPlugin::VtuberPlugin::VtuberCreate(obs_data_t *settings,
 							   obs_source_t *source)
 {
-	Vtuber_data *vtb = (Vtuber_data *)malloc(sizeof(Vtuber_data));
+	Vtuber_data *vtb = new Vtuber_data();
 	vtb->source = source;
 	vtb->modelId = 0;
 
@@ -50,6 +196,8 @@ void * VtuberPlugin::VtuberPlugin::VtuberCreate(obs_data_t *settings,
 				delayTime, random_motion, breath, eyeblink,
 				NULL, track, mode, live2D, relative_mouse,
 				mouse_horizontal_flip, mouse_vertical_flip,mask);
+
+	update_mouth_settings(vtb, settings);
 	return vtb;
 }
 
@@ -57,6 +205,12 @@ void VtuberPlugin::VtuberPlugin::VtuberDestroy(void *data)
 {
 	
 	Vtuber_data *spv = (Vtuber_data *)data;
+
+	{
+		std::lock_guard<std::mutex> lock(spv->audioMutex);
+		detach_audio_locked(spv);
+	}
+	MouthSync::SetEnabled(false);
 
 	VtuberFrameWork::UinitVtuber(0);
 
@@ -150,6 +304,23 @@ obs_properties_t * VtuberPlugin::VtuberPlugin::VtuberGetProperties(void *data)
 	obs_properties_add_bool(ppts, "breath", obs_module_text("Breath"));
 	obs_properties_add_bool(ppts, "eyeblink", obs_module_text("EyeBlink"));
 	obs_properties_add_bool(ppts, "track", obs_module_text("Mouse Tracktion"));
+
+	// Mouth sync
+	obs_properties_add_bool(ppts, "mouth_sync", obs_module_text("MouthSync"));
+	p = obs_properties_add_list(ppts, "mouth_audio_source",
+				    obs_module_text("MouthAudioSource"),
+				    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	fill_audio_source_list(p);
+	p = obs_properties_add_float_slider(ppts, "mouth_threshold",
+					    obs_module_text("MouthThreshold"),
+					    -80.0, 0.0, 1.0);
+	obs_property_float_set_suffix(p, " dB");
+	p = obs_properties_add_float_slider(ppts, "mouth_range",
+					    obs_module_text("MouthRange"),
+					    5.0, 60.0, 1.0);
+	obs_property_float_set_suffix(p, " dB");
+	obs_properties_add_text(ppts, "mouth_param",
+				obs_module_text("MouthParam"), OBS_TEXT_DEFAULT);
 	
 
 	return ppts;
@@ -184,6 +355,31 @@ void VtuberPlugin::VtuberPlugin::Vtuber_update(
 				vtb_str, track, mode, live2D, relative_mouse,
 				mouse_horizontal_flip, mouse_vertical_flip,
 				mask);
+
+	update_mouth_settings(vtb, settings);
+}
+
+void VtuberPlugin::VtuberPlugin::VtuberTick(void *data, float seconds)
+{
+	Vtuber_data *vtb = (Vtuber_data *)data;
+
+	std::lock_guard<std::mutex> lock(vtb->audioMutex);
+	if (!vtb->mouthEnabled || vtb->audioName.empty())
+		return;
+
+	// The microphone source was deleted in OBS: let go of it
+	if (vtb->audioSource && obs_source_removed(vtb->audioSource))
+		detach_audio_locked(vtb);
+
+	// Not attached yet (OBS is still loading or the source was renamed):
+	// try again once a second
+	if (!vtb->audioSource) {
+		vtb->retryTimer += seconds;
+		if (vtb->retryTimer >= 1.0f) {
+			vtb->retryTimer = 0.0f;
+			attach_audio_locked(vtb);
+		}
+	}
 }
 
 void VtuberPlugin::VtuberPlugin::Vtuber_defaults(
@@ -205,4 +401,9 @@ void VtuberPlugin::VtuberPlugin::Vtuber_defaults(
 	obs_data_set_default_bool(settings, "mouse_horizontal_flip",true);
 	obs_data_set_default_bool(settings, "mouse_vertical_flip",true);
 	obs_data_set_default_bool(settings, "mask", false);
+	obs_data_set_default_bool(settings, "mouth_sync", false);
+	obs_data_set_default_string(settings, "mouth_audio_source", "");
+	obs_data_set_default_double(settings, "mouth_threshold", -45.0);
+	obs_data_set_default_double(settings, "mouth_range", 25.0);
+	obs_data_set_default_string(settings, "mouth_param", "ParamMouthOpenY");
 }

@@ -186,6 +186,9 @@ private:
     const Csm::CubismId *_idParamMouseY;
     const Csm::CubismId *_idParamLeftButton;
     const Csm::CubismId *_idParamRightButton; 
+    const Csm::CubismId *_idParamMouthOpen;      ///< parameter opened by mouth sync
+    Csm::csmUint32 _mouthParamVersion;           ///< MouthSync parameter name version seen last
+    Csm::csmFloat32 _mouthValue;                 ///< smoothed mouth opening 0..1
 
     Csm::Rendering::CubismOffscreenFrame_OpenGLES2  _renderBuffer;   ///< フレームバッファ以外の描画先
 

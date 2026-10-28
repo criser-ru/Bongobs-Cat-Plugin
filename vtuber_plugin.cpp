@@ -33,6 +33,8 @@ bool obs_module_load(void)
 		VtuberPlugin::VtuberPlugin::Vtuber_update;
 	Vtuber_video.get_defaults =
 		VtuberPlugin::VtuberPlugin::Vtuber_defaults;
+	Vtuber_video.video_tick =
+		VtuberPlugin::VtuberPlugin::VtuberTick;
 
 	obs_register_source(&Vtuber_video);
 

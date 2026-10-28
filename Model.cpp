@@ -20,6 +20,7 @@
 #include "Pal.hpp"
 #include "LAppTextureManager.hpp"
 #include "VtuberDelegate.hpp"
+#include "MouthSync.hpp"
 
 #define ALLMOTIONDISPLAY true
 
@@ -66,6 +67,9 @@ Model::Model()
     _idParamMouseY = CubismFramework::GetIdManager()->GetId(ParaMouseY);
     _idParamLeftButton = CubismFramework::GetIdManager()->GetId(ParaLeftButton);
     _idParamRightButton =CubismFramework::GetIdManager()->GetId(ParaRightButton);
+    _idParamMouthOpen = CubismFramework::GetIdManager()->GetId(ParamMouthOpenY);
+    _mouthParamVersion = 0;
+    _mouthValue = 0.0f;
 }
 
 Model::~Model()
@@ -445,14 +449,31 @@ void Model::Update(Csm::csmUint16 _id)
         _physics->Evaluate(_model, deltaTimeSeconds);
     }
 
-    // リップシンクの設定
-    if (_lipSync)
+    // リップシンクの設定 / Mouth sync by microphone volume
+    if (MouthSync::IsEnabled())
     {
-        csmFloat32 value = 0; // リアルタイムでリップシンクを行う場合、システムから音量を取得して0〜1の範囲で値を入力します。
+        // Look the parameter up again if the user changed its name in settings
+        csmUint32 version = MouthSync::GetParameterVersion();
+        if (version != _mouthParamVersion)
+        {
+            std::string name = MouthSync::GetParameterName();
+            _idParamMouthOpen = CubismFramework::GetIdManager()->GetId(name.c_str());
+            _mouthParamVersion = version;
+        }
 
+        // Smooth the value: open fast, close a bit slower, so it looks natural
+        csmFloat32 target = MouthSync::GetLevel();
+        csmFloat32 speed = (target > _mouthValue) ? 25.0f : 12.0f;
+        csmFloat32 k = GetDeltaTime() * speed; // real time, not affected by the "Speed" slider
+        if (k > 1.0f) k = 1.0f;
+        _mouthValue += (target - _mouthValue) * k;
+
+        // Set (not add) the value so idle motions do not keep the mouth open
+        _model->SetParameterValue(_idParamMouthOpen, _mouthValue);
         for (csmUint32 i = 0; i < _lipSyncIds.GetSize(); ++i)
         {
-            _model->AddParameterValue(_lipSyncIds[i], value, 0.8f);
+            if (_lipSyncIds[i] != _idParamMouthOpen)
+                _model->SetParameterValue(_lipSyncIds[i], _mouthValue);
         }
     }
 

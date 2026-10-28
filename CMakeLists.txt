@@ -1,7 +1,35 @@
-# Set app name.
-set(APP_NAME bongobs-cat)
+# Standalone build of Bongobs Cat for Windows x64.
+# Builds against the libobs headers (OBS source) and an obs.lib import library
+# made from obs.dll of the installed OBS version. See .github/workflows/build.yml.
+#
+#   cmake -B build -G "Visual Studio 17 2022" -A x64
+#         -DOBS_SOURCE_DIR=<path to obs-studio source> -DOBS_LIB=<path to obs.lib>
+#         -DCMAKE_POLICY_VERSION_MINIMUM=3.5
+#   cmake --build build --config Release
+#   cmake --install build --config Release --prefix <package dir>
 
-# Set directory paths.
+cmake_minimum_required(VERSION 3.16)
+
+set(APP_NAME bongobs-cat)
+project(${APP_NAME} C CXX)
+
+set(OBS_SOURCE_DIR "" CACHE PATH "Path to obs-studio source (for libobs headers)")
+set(OBS_LIB "" CACHE FILEPATH "Path to obs.lib (import library for obs.dll)")
+
+if(NOT MSVC)
+  message(FATAL_ERROR "[${APP_NAME}] Only Visual Studio on Windows is supported.")
+endif()
+if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+  message(FATAL_ERROR "[${APP_NAME}] Only 64-bit builds are supported (use -A x64).")
+endif()
+if(NOT EXISTS "${OBS_SOURCE_DIR}/libobs/obs.h")
+  message(FATAL_ERROR "[${APP_NAME}] OBS_SOURCE_DIR does not point to obs-studio source.")
+endif()
+if(NOT EXISTS "${OBS_LIB}")
+  message(FATAL_ERROR "[${APP_NAME}] OBS_LIB (obs.lib) not found.")
+endif()
+
+# Directory paths.
 set(SDK_ROOT_PATH ${CMAKE_CURRENT_SOURCE_DIR})
 set(CORE_PATH ${SDK_ROOT_PATH}/CubismSdk/Core)
 set(FRAMEWORK_PATH ${SDK_ROOT_PATH}/CubismSdk/Framework)
@@ -9,141 +37,129 @@ set(THIRD_PARTY_PATH ${SDK_ROOT_PATH}/thirdParty)
 set(STB_PATH ${THIRD_PARTY_PATH}/stb)
 set(GLEW_PATH ${THIRD_PARTY_PATH}/glew)
 set(GLFW_PATH ${THIRD_PARTY_PATH}/glfw)
-set(RES_PATH ${SDK_ROOT_PATH}/Resources)
 
-project(${APP_NAME})
+set(ARCH x86_64)
 
-# Detect architecture.
-if(CMAKE_EXE_LINKER_FLAGS STREQUAL "/machine:x64 /OPT:REF")
-  set(ARCH x86_64)
-elseif(CMAKE_EXE_LINKER_FLAGS STREQUAL "/machine:x86 /OPT:REF")
-  set(ARCH x86)
-else()
-  message(FATAL_ERROR "[${APP_NAME}] Invalid linker flag ${CMAKE_EXE_LINKER_FLAGS}.")
-endif()
-
-# Detect compiler.
-if(MSVC_VERSION MATCHES 1800)
-  # Visual Studio 2013
-  set(COMPILER 120)
-elseif(MSVC_VERSION MATCHES 1900)
-  # Visual Studio 2015
-  set(COMPILER 140)
-elseif(MSVC_VERSION GREATER_EQUAL 1910 AND MSVC_VERSION LESS 1920)
-  # Visual Studio 2017
-  set(COMPILER 141)
-elseif(MSVC_VERSION GREATER_EQUAL 1920 AND MSVC_VERSION LESS 1930)
-  # Visual Studio 2019
+# The bundled Live2D Cubism Core has static libraries up to VS2019 (v142).
+# Static libraries built with v142 link fine with VS2022 (v143).
+if(MSVC_VERSION GREATER_EQUAL 1920)
   set(COMPILER 142)
-elseif(MSVC)
-  message(FATAL_ERROR "[${APP_NAME}] Unsupported Visual C++ compiler used.")
+elseif(MSVC_VERSION GREATER_EQUAL 1910)
+  set(COMPILER 141)
 else()
-  message(FATAL_ERROR "[${APP_NAME}] Unsupported compiler used.")
-endif()
-# Detect core crt.
-if(CORE_CRL_MD)
-  set(CRT MD)
-else()
-  set(CRT MT)
+  message(FATAL_ERROR "[${APP_NAME}] Visual Studio 2017 or newer is required.")
 endif()
 
-# Add Cubism Core.
-# Import as static library.
+# OBS plugins use the DLL C runtime (/MD), so Live2D Core must match.
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>DLL")
+set(CRT MD)
+
+# Live2D Cubism Core (static).
 add_library(Live2DCubismCore STATIC IMPORTED)
-# Find library path.
 set(CORE_LIB_SUFFIX ${CORE_PATH}/lib/windows/${ARCH}/${COMPILER})
 set_target_properties(Live2DCubismCore
   PROPERTIES
-    IMPORTED_LOCATION_DEBUG
-      ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}d.lib
-    IMPORTED_LOCATION_RELWITHDEBINFO
-      ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}d.lib
-    IMPORTED_LOCATION_RELEASE
-      ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}.lib
-    IMPORTED_LOCATION_MINSIZEREL
-      ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}.lib
+    IMPORTED_LOCATION_DEBUG ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}d.lib
+    IMPORTED_LOCATION_RELWITHDEBINFO ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}.lib
+    IMPORTED_LOCATION_RELEASE ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}.lib
+    IMPORTED_LOCATION_MINSIZEREL ${CORE_LIB_SUFFIX}/Live2DCubismCore_${CRT}.lib
     INTERFACE_INCLUDE_DIRECTORIES ${CORE_PATH}/include
 )
 
-# Add GLEW ,GLFW.
-add_subdirectory(${GLEW_PATH}/build/cmake ${CMAKE_CURRENT_SOURCE_DIR}/gl/glew)
-add_subdirectory(${GLFW_PATH} ${CMAKE_CURRENT_SOURCE_DIR}/gl/glfw)
-set_target_properties(glew PROPERTIES FOLDER "plugins/${APP_NAME}")
-set_target_properties(glew_s PROPERTIES FOLDER "plugins/${APP_NAME}")
+# GLEW and GLFW (bundled).
+set(BUILD_UTILS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+add_subdirectory(${GLEW_PATH}/build/cmake ${CMAKE_CURRENT_BINARY_DIR}/glew EXCLUDE_FROM_ALL)
+add_subdirectory(${GLFW_PATH} ${CMAKE_CURRENT_BINARY_DIR}/glfw EXCLUDE_FROM_ALL)
 
-# Specify Cubism Framework rendering.
+# Live2D Cubism Native Framework with OpenGL rendering.
 set(FRAMEWORK_SOURCE OpenGL)
-# Add Cubism Native Framework.
 add_subdirectory(${FRAMEWORK_PATH} ${CMAKE_CURRENT_BINARY_DIR}/Framework)
-# Add rendering definition to framework.
 target_compile_definitions(Framework PUBLIC CSM_TARGET_WIN_GL)
-# Add include path of GLEW to framework.
 target_include_directories(Framework PUBLIC ${GLEW_PATH}/include)
-# Link libraries to framework.
 target_link_libraries(Framework Live2DCubismCore glew_s)
 
-set_target_properties(Framework PROPERTIES FOLDER "plugins/${APP_NAME}")
-# Find opengl libraries.
 find_package(OpenGL REQUIRED)
 
+# libobs: headers from OBS source + generated obsconfig.h, linked to obs.lib.
+set(OBS_GENERATED_DIR ${CMAKE_CURRENT_BINARY_DIR}/obs-generated)
+file(WRITE ${OBS_GENERATED_DIR}/obsconfig.h
+"#pragma once
+#define OBS_DATA_PATH \"../../data\"
+#define OBS_PLUGIN_PATH \"../../obs-plugins/64bit\"
+#define OBS_PLUGIN_DESTINATION \"obs-plugins/64bit\"
+#define OBS_INSTALL_PREFIX \"\"
+#define OBS_RELEASE_CANDIDATE 0
+#define OBS_BETA 0
+")
+add_library(libobs SHARED IMPORTED)
+set_target_properties(libobs
+  PROPERTIES
+    IMPORTED_IMPLIB ${OBS_LIB}
+    INTERFACE_INCLUDE_DIRECTORIES "${OBS_SOURCE_DIR}/libobs;${OBS_GENERATED_DIR}"
+)
+
 set(${APP_NAME}_SOURCES
-	vtuber_plugin.cpp
- 	VtuberPlugin.cpp
-	VtuberFrameWork.cpp  
-	VtuberDelegate.cpp
-	View.cpp	
-	Live2DManager.cpp
-	Model.cpp	
-	Pal.cpp	
-	LAppTextureManager.cpp			    
-	LAppAllocator.cpp
-        Sprite.cpp
-        Hook.cpp
-	EventManager.cpp
-	Define.cpp
-	json.cpp
-	InfoReader.cpp
-	)
-
-set(${APP_NAME}_HEADERS	
-	LAppAllocator.hpp
-	Define.hpp
-	VtuberDelegate.hpp
-	Live2DManager.hpp
-	LAppTextureManager.hpp
-	Model.hpp
-	Pal.hpp
-	View.hpp
-	VtuberFrameWork.hpp
-	VtuberPlugin.hpp
-        Sprite.hpp
-        Hook.hpp
-        EventManager.hpp
-	InfoReader.hpp
-	json.h
-	json-forwards.h
+  vtuber_plugin.cpp
+  VtuberPlugin.cpp
+  VtuberFrameWork.cpp
+  VtuberDelegate.cpp
+  View.cpp
+  Live2DManager.cpp
+  Model.cpp
+  Pal.cpp
+  LAppTextureManager.cpp
+  LAppAllocator.cpp
+  Sprite.cpp
+  Hook.cpp
+  EventManager.cpp
+  Define.cpp
+  jsoncpp.cpp
+  InfoReader.cpp
+  MouthSync.cpp
 )
 
-#find_package(Thread REQUIRED)
-
-add_library(${APP_NAME} MODULE
-	${${APP_NAME}_SOURCES}
-	${${APP_NAME}_HEADERS}    	
+set(${APP_NAME}_HEADERS
+  LAppAllocator.hpp
+  Define.hpp
+  VtuberDelegate.hpp
+  Live2DManager.hpp
+  LAppTextureManager.hpp
+  Model.hpp
+  Pal.hpp
+  View.hpp
+  VtuberFrameWork.hpp
+  VtuberPlugin.hpp
+  Sprite.hpp
+  Hook.hpp
+  EventManager.hpp
+  InfoReader.hpp
+  MouthSync.hpp
+  json.h
+  json-forwards.h
 )
 
-# Link libraries to app.
+add_library(${APP_NAME} MODULE ${${APP_NAME}_SOURCES} ${${APP_NAME}_HEADERS})
+
+target_compile_features(${APP_NAME} PRIVATE cxx_std_17)
+# Source files contain Chinese/Japanese comments; read them as UTF-8.
+target_compile_options(${APP_NAME} PRIVATE /utf-8)
+target_compile_options(Framework PRIVATE /utf-8)
+target_compile_definitions(${APP_NAME} PRIVATE _CRT_SECURE_NO_WARNINGS)
+
 target_link_libraries(${APP_NAME}
- 	libobs
-	${LIBFDK_LIBRARIES}
-	Framework
-	glfw
-	${OPENGL_LIBRARIES}
+  libobs
+  Framework
+  glfw
+  ${OPENGL_LIBRARIES}
 )
-
-# Specify include directories.
 target_include_directories(${APP_NAME} PRIVATE ${STB_PATH})
 
-set_target_properties(${APP_NAME} PROPERTIES FOLDER "plugins/${APP_NAME}")
+set_target_properties(${APP_NAME} PROPERTIES PREFIX "" OUTPUT_NAME ${APP_NAME})
 
-install_obs_plugin_with_data(${APP_NAME} data)
-
+# Package layout matches the OBS folder: unzip the result into the OBS root.
+install(TARGETS ${APP_NAME} LIBRARY DESTINATION obs-plugins/64bit RUNTIME DESTINATION obs-plugins/64bit)
+install(DIRECTORY data/ DESTINATION data/obs-plugins/${APP_NAME})

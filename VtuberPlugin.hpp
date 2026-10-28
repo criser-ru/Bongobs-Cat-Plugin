@@ -27,5 +27,7 @@ namespace VtuberPlugin {
 		static void Vtuber_update(void *data, obs_data_t *settings);
 
 		static void Vtuber_defaults(obs_data_t *settings);
+
+		static void VtuberTick(void *data, float seconds);
 	};
 }
