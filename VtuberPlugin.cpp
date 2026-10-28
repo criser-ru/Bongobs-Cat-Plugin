@@ -30,7 +30,89 @@ namespace{
 		// Diagnostics: loudest level over the last few seconds, written to the OBS log
 		std::atomic<float> peakDb{-100.0f};
 		std::atomic<uint64_t> lastLogNs{0};
+
+		// Drawn "o" mouth on top of the picture (for models without a rigged mouth)
+		std::atomic<bool> drawMouth{true};
+		std::atomic<float> mouthPosX{50.0f};  // % of width, from the left
+		std::atomic<float> mouthPosY{50.0f};  // % of height, from the top
+		std::atomic<float> mouthSize{3.0f};   // % of width
+		float shownLevel = 0.0f;               // smoothed level, render thread only
+		uint64_t lastRenderNs = 0;
 	};
+
+	// Blends one pixel of colour (r, g, b) with coverage a (0..1) over the frame.
+	inline void blend_pixel(uint8_t *px, uint8_t r, uint8_t g, uint8_t b, float a)
+	{
+		if (a <= 0.0f)
+			return;
+		if (a > 1.0f)
+			a = 1.0f;
+		px[0] = (uint8_t)(r * a + px[0] * (1.0f - a));
+		px[1] = (uint8_t)(g * a + px[1] * (1.0f - a));
+		px[2] = (uint8_t)(b * a + px[2] * (1.0f - a));
+		float dstA = px[3] / 255.0f;
+		px[3] = (uint8_t)((a + dstA * (1.0f - a)) * 255.0f);
+	}
+
+	// Draws an "o" mouth whose height follows the voice level.
+	// The frame comes from glReadPixels: RGBA, rows bottom-up, width*4 bytes per row.
+	void draw_mouth(Vtuber_data *vtb, uint8_t *data, int width, int height)
+	{
+		// Smooth the level here so it works in every mode, with or without Live2D
+		uint64_t now = os_gettime_ns();
+		float dt = vtb->lastRenderNs ? (float)((now - vtb->lastRenderNs) / 1e9) : 0.0f;
+		vtb->lastRenderNs = now;
+		if (dt > 0.2f)
+			dt = 0.2f;
+
+		float target = MouthSync::GetLevel();
+		if (MouthSync::IsTestMode())
+			target = 0.5f + 0.5f * std::sin((float)(now / 1e9) * 6.0f);
+		float speed = (target > vtb->shownLevel) ? 25.0f : 12.0f;
+		float k = dt * speed;
+		if (k > 1.0f)
+			k = 1.0f;
+		vtb->shownLevel += (target - vtb->shownLevel) * k;
+
+		float level = vtb->shownLevel;
+		if (level < 0.05f || width <= 0 || height <= 0)
+			return; // mouth closed: draw nothing
+
+		float cx = vtb->mouthPosX.load() / 100.0f * width;
+		float cy = vtb->mouthPosY.load() / 100.0f * height;
+		float rx = vtb->mouthSize.load() / 100.0f * width * 0.5f;
+		if (rx < 2.0f)
+			rx = 2.0f;
+		float ry = rx * (0.4f + 0.9f * level); // opens taller with louder voice
+		float ring = rx * 0.28f;                // thickness of the dark outline
+		if (ring < 1.5f)
+			ring = 1.5f;
+
+		int x0 = (int)std::floor(cx - rx - 2), x1 = (int)std::ceil(cx + rx + 2);
+		int y0 = (int)std::floor(cy - ry - 2), y1 = (int)std::ceil(cy + ry + 2);
+		if (x0 < 0) x0 = 0;
+		if (y0 < 0) y0 = 0;
+		if (x1 > width - 1) x1 = width - 1;
+		if (y1 > height - 1) y1 = height - 1;
+
+		float irx = rx - ring, iry = ry - ring;
+		if (irx < 1.0f) irx = 1.0f;
+		if (iry < 1.0f) iry = 1.0f;
+
+		for (int y = y0; y <= y1; y++) {
+			int row = height - 1 - y; // buffer rows go bottom-up
+			uint8_t *line = data + (size_t)row * width * 4;
+			for (int x = x0; x <= x1; x++) {
+				float dx = x + 0.5f - cx, dy = y + 0.5f - cy;
+				// distance to each ellipse edge in pixels (approximate), for soft edges
+				float outer = (std::sqrt(dx * dx / (rx * rx) + dy * dy / (ry * ry)) - 1.0f) * std::fmin(rx, ry);
+				float inner = (std::sqrt(dx * dx / (irx * irx) + dy * dy / (iry * iry)) - 1.0f) * std::fmin(irx, iry);
+				uint8_t *px = line + x * 4;
+				blend_pixel(px, 40, 22, 26, 0.5f - outer);   // dark outline
+				blend_pixel(px, 150, 50, 60, 0.5f - inner);  // inside of the mouth
+			}
+		}
+	}
 
 	// Finds an audio source by name, including global ones (Mic/Aux, Desktop Audio).
 	// Returns a source with an added reference, or nullptr.
@@ -133,6 +215,10 @@ namespace{
 
 		vtb->thresholdDb.store((float)obs_data_get_double(settings, "mouth_threshold"));
 		vtb->rangeDb.store((float)obs_data_get_double(settings, "mouth_range"));
+		vtb->drawMouth.store(obs_data_get_bool(settings, "mouth_draw"));
+		vtb->mouthPosX.store((float)obs_data_get_double(settings, "mouth_pos_x"));
+		vtb->mouthPosY.store((float)obs_data_get_double(settings, "mouth_pos_y"));
+		vtb->mouthSize.store((float)obs_data_get_double(settings, "mouth_size"));
 
 		const char *param = obs_data_get_string(settings, "mouth_param");
 		MouthSync::SetParameterName(param ? param : "");
@@ -258,8 +344,11 @@ void VtuberPlugin::VtuberPlugin::VtuberRender(
 
 	uint8_t *ptr;
 	uint32_t linesize;
-	if (gs_texture_map(tex, &ptr, &linesize))
+	if (gs_texture_map(tex, &ptr, &linesize)) {
 		VtuberFrameWork::ReanderVtuber(spv->modelId,(char*) ptr,width,height);
+		if (MouthSync::IsEnabled() && spv->drawMouth.load())
+			draw_mouth(spv, ptr, width, height);
+	}
 	gs_texture_unmap(tex);
 	
 	obs_source_draw(tex, 0, 0, 0, 0, true);
@@ -345,6 +434,13 @@ obs_properties_t * VtuberPlugin::VtuberPlugin::VtuberGetProperties(void *data)
 					    5.0, 60.0, 1.0);
 	obs_property_float_set_suffix(p, " dB");
 	obs_properties_add_bool(ppts, "mouth_test", obs_module_text("MouthTest"));
+	obs_properties_add_bool(ppts, "mouth_draw", obs_module_text("MouthDraw"));
+	p = obs_properties_add_float_slider(ppts, "mouth_pos_x", obs_module_text("MouthPosX"), 0.0, 100.0, 0.25);
+	obs_property_float_set_suffix(p, " %");
+	p = obs_properties_add_float_slider(ppts, "mouth_pos_y", obs_module_text("MouthPosY"), 0.0, 100.0, 0.25);
+	obs_property_float_set_suffix(p, " %");
+	p = obs_properties_add_float_slider(ppts, "mouth_size", obs_module_text("MouthSize"), 0.5, 20.0, 0.25);
+	obs_property_float_set_suffix(p, " %");
 	obs_properties_add_text(ppts, "mouth_param",
 				obs_module_text("MouthParam"), OBS_TEXT_DEFAULT);
 	
@@ -433,4 +529,8 @@ void VtuberPlugin::VtuberPlugin::Vtuber_defaults(
 	obs_data_set_default_double(settings, "mouth_range", 25.0);
 	obs_data_set_default_string(settings, "mouth_param", "ParamMouthOpenY");
 	obs_data_set_default_bool(settings, "mouth_test", false);
+	obs_data_set_default_bool(settings, "mouth_draw", true);
+	obs_data_set_default_double(settings, "mouth_pos_x", 50.0);
+	obs_data_set_default_double(settings, "mouth_pos_y", 50.0);
+	obs_data_set_default_double(settings, "mouth_size", 3.0);
 }
