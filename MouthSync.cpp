@@ -8,6 +8,7 @@
 
 namespace {
 	std::atomic<bool> g_enabled{false};
+	std::atomic<bool> g_test{false};
 	std::atomic<float> g_level{0.0f};
 	std::atomic<unsigned int> g_paramVersion{1};
 	std::mutex g_nameMutex;
@@ -59,6 +60,16 @@ std::string MouthSync::GetParameterName()
 {
 	std::lock_guard<std::mutex> lock(g_nameMutex);
 	return g_paramName;
+}
+
+void MouthSync::SetTestMode(bool test)
+{
+	g_test.store(test);
+}
+
+bool MouthSync::IsTestMode()
+{
+	return g_test.load();
 }
 
 float MouthSync::DbToLevel(float db, float thresholdDb, float rangeDb)

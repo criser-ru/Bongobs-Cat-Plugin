@@ -25,6 +25,11 @@ namespace MouthSync {
 	unsigned int GetParameterVersion();
 	std::string GetParameterName();
 
+	// Test mode: the mouth opens and closes by itself, without audio.
+	// Shows whether the model can open its mouth at all.
+	void SetTestMode(bool test);
+	bool IsTestMode();
+
 	// Converts an audio level in dB to a mouth opening 0..1:
 	// below thresholdDb -> 0, at thresholdDb + rangeDb and above -> 1.
 	float DbToLevel(float db, float thresholdDb, float rangeDb);

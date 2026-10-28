@@ -6,6 +6,7 @@
 #include "VtuberFrameWork.hpp"
 #include "MouthSync.hpp"
 #include <obs-module.h>
+#include <util/platform.h>
 #include <atomic>
 #include <cmath>
 #include <mutex>
@@ -25,6 +26,10 @@ namespace{
 		std::atomic<float> thresholdDb{-45.0f};
 		std::atomic<float> rangeDb{25.0f};
 		float retryTimer = 0.0f;
+
+		// Diagnostics: loudest level over the last few seconds, written to the OBS log
+		std::atomic<float> peakDb{-100.0f};
+		std::atomic<uint64_t> lastLogNs{0};
 	};
 
 	// Finds an audio source by name, including global ones (Mic/Aux, Desktop Audio).
@@ -81,6 +86,18 @@ namespace{
 		float db = rms > 0.0 ? (float)(20.0 * std::log10(rms)) : -100.0f;
 		MouthSync::SetLevel(MouthSync::DbToLevel(
 			db, vtb->thresholdDb.load(), vtb->rangeDb.load()));
+
+		if (db > vtb->peakDb.load())
+			vtb->peakDb.store(db);
+		uint64_t now = os_gettime_ns();
+		if (now - vtb->lastLogNs.load() > 5000000000ULL) {
+			vtb->lastLogNs.store(now);
+			float peak = vtb->peakDb.exchange(-100.0f);
+			blog(LOG_INFO,
+			     "[bongobs-cat] mouth sync: loudest voice in 5 s = %.1f dB (threshold %.1f dB, fully open at %.1f dB)",
+			     peak, vtb->thresholdDb.load(),
+			     vtb->thresholdDb.load() + vtb->rangeDb.load());
+		}
 	}
 
 	// Both helpers below must be called with vtb->audioMutex locked.
@@ -104,6 +121,8 @@ namespace{
 			return; // the source may not be loaded yet, VtuberTick retries
 		obs_source_add_audio_capture_callback(src, mouth_audio_callback, vtb);
 		vtb->audioSource = src;
+		blog(LOG_INFO, "[bongobs-cat] mouth sync: listening to audio source '%s'",
+		     vtb->audioName.c_str());
 	}
 
 	void update_mouth_settings(Vtuber_data *vtb, obs_data_t *settings)
@@ -126,6 +145,12 @@ namespace{
 			attach_audio_locked(vtb);
 		}
 		MouthSync::SetEnabled(enabled);
+		MouthSync::SetTestMode(obs_data_get_bool(settings, "mouth_test"));
+		blog(LOG_INFO,
+		     "[bongobs-cat] mouth sync: %s, audio source '%s' (%s), test %s",
+		     enabled ? "ON" : "OFF", vtb->audioName.c_str(),
+		     vtb->audioSource ? "connected" : "not connected",
+		     obs_data_get_bool(settings, "mouth_test") ? "ON" : "OFF");
 	}
 
 	bool add_audio_source_name(void *param, obs_source_t *src)
@@ -319,6 +344,7 @@ obs_properties_t * VtuberPlugin::VtuberPlugin::VtuberGetProperties(void *data)
 					    obs_module_text("MouthRange"),
 					    5.0, 60.0, 1.0);
 	obs_property_float_set_suffix(p, " dB");
+	obs_properties_add_bool(ppts, "mouth_test", obs_module_text("MouthTest"));
 	obs_properties_add_text(ppts, "mouth_param",
 				obs_module_text("MouthParam"), OBS_TEXT_DEFAULT);
 	
@@ -406,4 +432,5 @@ void VtuberPlugin::VtuberPlugin::Vtuber_defaults(
 	obs_data_set_default_double(settings, "mouth_threshold", -45.0);
 	obs_data_set_default_double(settings, "mouth_range", 25.0);
 	obs_data_set_default_string(settings, "mouth_param", "ParamMouthOpenY");
+	obs_data_set_default_bool(settings, "mouth_test", false);
 }

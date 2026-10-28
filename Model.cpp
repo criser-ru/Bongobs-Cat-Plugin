@@ -21,6 +21,8 @@
 #include "LAppTextureManager.hpp"
 #include "VtuberDelegate.hpp"
 #include "MouthSync.hpp"
+#include <cmath>
+#include <util/base.h>
 
 #define ALLMOTIONDISPLAY true
 
@@ -459,10 +461,21 @@ void Model::Update(Csm::csmUint16 _id)
             std::string name = MouthSync::GetParameterName();
             _idParamMouthOpen = CubismFramework::GetIdManager()->GetId(name.c_str());
             _mouthParamVersion = version;
+
+            // Tell in the OBS log whether this model has the parameter at all
+            bool found = _model->GetParameterIndex(_idParamMouthOpen) < _model->GetParameterCount();
+            blog(found ? LOG_INFO : LOG_WARNING,
+                 "[bongobs-cat] mouth sync: parameter '%s' %s in the model (lip sync ids: %u)",
+                 name.c_str(), found ? "FOUND" : "NOT FOUND", (unsigned)_lipSyncIds.GetSize());
         }
 
         // Smooth the value: open fast, close a bit slower, so it looks natural
         csmFloat32 target = MouthSync::GetLevel();
+        if (MouthSync::IsTestMode())
+        {
+            // Test: open and close the mouth about once a second
+            target = 0.5f + 0.5f * std::sin(_userTimeSeconds * 6.0f);
+        }
         csmFloat32 speed = (target > _mouthValue) ? 25.0f : 12.0f;
         csmFloat32 k = GetDeltaTime() * speed; // real time, not affected by the "Speed" slider
         if (k > 1.0f) k = 1.0f;
