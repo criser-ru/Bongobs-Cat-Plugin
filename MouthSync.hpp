@@ -30,6 +30,13 @@ namespace MouthSync {
 	void SetTestMode(bool test);
 	bool IsTestMode();
 
+	// Where the drawn mouth hangs from, in frame pixels (OpenGL style: y goes up,
+	// row 0 is the bottom row, same as the buffer from glReadPixels).
+	// The model sets it every frame while it is drawn; the plugin reads it after rendering.
+	void BeginFrame();
+	void SetAnchors(float ax, float ay, float bx, float by);
+	bool GetAnchors(float &ax, float &ay, float &bx, float &by);
+
 	// Converts an audio level in dB to a mouth opening 0..1:
 	// below thresholdDb -> 0, at thresholdDb + rangeDb and above -> 1.
 	float DbToLevel(float db, float thresholdDb, float rangeDb);

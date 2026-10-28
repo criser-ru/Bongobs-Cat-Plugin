@@ -13,6 +13,35 @@ namespace {
 	std::atomic<unsigned int> g_paramVersion{1};
 	std::mutex g_nameMutex;
 	std::string g_paramName = "ParamMouthOpenY";
+
+	// Render thread only: written by the model, read by the plugin in the same frame
+	bool g_anchorsValid = false;
+	float g_anchors[4] = {0, 0, 0, 0};
+}
+
+void MouthSync::BeginFrame()
+{
+	g_anchorsValid = false;
+}
+
+void MouthSync::SetAnchors(float ax, float ay, float bx, float by)
+{
+	g_anchors[0] = ax;
+	g_anchors[1] = ay;
+	g_anchors[2] = bx;
+	g_anchors[3] = by;
+	g_anchorsValid = true;
+}
+
+bool MouthSync::GetAnchors(float &ax, float &ay, float &bx, float &by)
+{
+	if (!g_anchorsValid)
+		return false;
+	ax = g_anchors[0];
+	ay = g_anchors[1];
+	bx = g_anchors[2];
+	by = g_anchors[3];
+	return true;
 }
 
 void MouthSync::SetEnabled(bool enabled)

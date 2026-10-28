@@ -190,6 +190,13 @@ private:
     Csm::csmUint32 _mouthParamVersion;           ///< MouthSync parameter name version seen last
     Csm::csmFloat32 _mouthValue;                 ///< smoothed mouth opening 0..1
 
+    // Two points under the drawn mouth, tied to a triangle of the face mesh,
+    // so the drawn opening follows the head (see BindMouthAnchors)
+    Csm::csmInt32 _mouthDrawable;
+    Csm::csmInt32 _mouthTri[2][3];
+    Csm::csmFloat32 _mouthBary[2][3];
+    void BindMouthAnchors();
+
     Csm::Rendering::CubismOffscreenFrame_OpenGLES2  _renderBuffer;   ///< フレームバッファ以外の描画先
 
     Csm::csmFloat32 mouseX;

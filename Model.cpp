@@ -72,6 +72,7 @@ Model::Model()
     _idParamMouthOpen = CubismFramework::GetIdManager()->GetId(ParamMouthOpenY);
     _mouthParamVersion = 0;
     _mouthValue = 0.0f;
+    _mouthDrawable = -1;
 }
 
 Model::~Model()
@@ -114,7 +115,95 @@ csmBool Model::LoadAssets(const csmChar* dir, const csmChar* fileName)
 
     SetupTextures();
 
+    BindMouthAnchors();
+
     return true;
+}
+
+namespace {
+    // Texture coordinates (u, v) of two points just under the drawn "ω" mouth,
+    // left lobe and right lobe. Measured on the bundled Bongo Cat textures.
+    struct MouthAnchorUv { const char* mode; float uv[2][2]; };
+    const MouthAnchorUv kMouthAnchors[] = {
+        { "/standard/", { { 0.15835f, 0.15139f }, { 0.17635f, 0.14426f } } },
+        { "/keyboard/", { { 0.37246f, 0.30176f }, { 0.41465f, 0.28418f } } },
+    };
+
+    // Barycentric coordinates of p in triangle (a, b, c); false if p is outside.
+    bool Barycentric(const Live2D::Cubism::Core::csmVector2& a, const Live2D::Cubism::Core::csmVector2& b,
+                     const Live2D::Cubism::Core::csmVector2& c, float px, float py, float out[3])
+    {
+        float den = (b.Y - c.Y) * (a.X - c.X) + (c.X - b.X) * (a.Y - c.Y);
+        if (std::fabs(den) < 1e-12f)
+            return false;
+        out[0] = ((b.Y - c.Y) * (px - c.X) + (c.X - b.X) * (py - c.Y)) / den;
+        out[1] = ((c.Y - a.Y) * (px - c.X) + (a.X - c.X) * (py - c.Y)) / den;
+        out[2] = 1.0f - out[0] - out[1];
+        return out[0] >= -1e-5f && out[1] >= -1e-5f && out[2] >= -1e-5f;
+    }
+}
+
+void Model::BindMouthAnchors()
+{
+    _mouthDrawable = -1;
+    if (_model == NULL)
+        return;
+
+    // Only the cat itself (".../mode/<mode>/model/cat/"), not the hand models
+    std::string dir = _modelHomeDir.GetRawString();
+    for (char& ch : dir)
+        if (ch == '\\') ch = '/';
+    const std::string suffix = "/model/cat/";
+    if (dir.size() < suffix.size() || dir.compare(dir.size() - suffix.size(), suffix.size(), suffix) != 0)
+        return;
+
+    const MouthAnchorUv* anchors = NULL;
+    for (const MouthAnchorUv& a : kMouthAnchors)
+        if (dir.find(a.mode) != std::string::npos)
+            anchors = &a;
+    if (anchors == NULL)
+    {
+        blog(LOG_WARNING, "[bongobs-cat] mouth sync: no mouth position known for model '%s'", dir.c_str());
+        return;
+    }
+
+    csmInt32 d = _model->GetDrawableIndex(CubismFramework::GetIdManager()->GetId("cat3"));
+    if (d < 0 || d >= _model->GetDrawableCount())
+    {
+        blog(LOG_WARNING, "[bongobs-cat] mouth sync: face mesh 'cat3' not found in '%s'", dir.c_str());
+        return;
+    }
+
+    const Live2D::Cubism::Core::csmVector2* uvs = _model->GetDrawableVertexUvs(d);
+    const csmUint16* indices = _model->GetDrawableVertexIndices(d);
+    csmInt32 indexCount = _model->GetDrawableVertexIndexCount(d);
+
+    for (int k = 0; k < 2; ++k)
+    {
+        bool found = false;
+        for (csmInt32 i = 0; i + 2 < indexCount && !found; i += 3)
+        {
+            float bary[3];
+            if (Barycentric(uvs[indices[i]], uvs[indices[i + 1]], uvs[indices[i + 2]],
+                            anchors->uv[k][0], anchors->uv[k][1], bary))
+            {
+                for (int j = 0; j < 3; ++j)
+                {
+                    _mouthTri[k][j] = indices[i + j];
+                    _mouthBary[k][j] = bary[j];
+                }
+                found = true;
+            }
+        }
+        if (!found)
+        {
+            blog(LOG_WARNING, "[bongobs-cat] mouth sync: mouth point %d not found on the face mesh", k);
+            return;
+        }
+    }
+
+    _mouthDrawable = d;
+    blog(LOG_INFO, "[bongobs-cat] mouth sync: mouth tied to the face of '%s'", dir.c_str());
 }
 
 
@@ -615,6 +704,33 @@ void Model::Draw(CubismMatrix44& matrix)
     GetRenderer<Rendering::CubismRenderer_OpenGLES2>()->SetMvpMatrix(&matrix);
 
     DoDraw();
+
+    // Tell the plugin where the mouth is in this frame (frame pixels, y up)
+    if (_mouthDrawable >= 0)
+    {
+        const Live2D::Cubism::Core::csmVector2* pos = _model->GetDrawableVertexPositions(_mouthDrawable);
+        // Actual OpenGL viewport (the hidden window may be scaled by Windows DPI settings)
+        GLint viewport[4] = {0, 0, RenderTargetWidth, RenderTargetHeight};
+        glGetIntegerv(GL_VIEWPORT, viewport);
+        if (viewport[2] <= 0 || viewport[3] <= 0)
+        {
+            viewport[2] = RenderTargetWidth;
+            viewport[3] = RenderTargetHeight;
+        }
+        float px[2], py[2];
+        for (int k = 0; k < 2; ++k)
+        {
+            float x = 0.0f, y = 0.0f;
+            for (int j = 0; j < 3; ++j)
+            {
+                x += _mouthBary[k][j] * pos[_mouthTri[k][j]].X;
+                y += _mouthBary[k][j] * pos[_mouthTri[k][j]].Y;
+            }
+            px[k] = viewport[0] + (matrix.TransformX(x) + 1.0f) * 0.5f * viewport[2];
+            py[k] = viewport[1] + (matrix.TransformY(y) + 1.0f) * 0.5f * viewport[3];
+        }
+        MouthSync::SetAnchors(px[0], py[0], px[1], py[1]);
+    }
 }
 
 void Model::SetExpression(const csmChar* expressionID)
